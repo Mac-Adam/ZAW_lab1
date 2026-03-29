@@ -72,4 +72,4 @@ def calibrate_color(image_path):
 
 if __name__ == "__main__":
     # Replace this with the path to one of your real photos
-    calibrate_color("data/test/good/000.png")
+    calibrate_color("data/test/missing_cable/006.png")
