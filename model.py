@@ -183,12 +183,13 @@ def predict(image: np.ndarray) -> np.ndarray:
     mask_names = ['insulation', 'blue_cable', 'yellow_cable', 'brown_cable', 'wire', 'black']
     
     if not CACHED_GOLDEN_MASKS:
+        base_dir = os.path.dirname(os.path.abspath(__file__)) 
         for name in mask_names:
-            path = f"masks/mask_{name}.png"
+            path = os.path.join(base_dir, "masks", f"mask_{name}.png")
             if os.path.exists(path):
                 CACHED_GOLDEN_MASKS[name] = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
             else:
-                print(f"Warning: {path} not found! Run prepare_golden_masks() first.")
+                print(f"Warning: {path} not found!")
                 return defect_mask
 
     bgr_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -269,19 +270,27 @@ def validate_prediction(pred_mask: np.ndarray, gt_mask: np.ndarray) -> dict:
 
     TP = np.sum((pred == 1) & (gt == 1))
     TN = np.sum((pred == 0) & (gt == 0))
-    FP = np.sum((
-        pred == 1) & (gt == 0))
+    FP = np.sum((pred == 1) & (gt == 0))
     FN = np.sum((pred == 0) & (gt == 1))
 
     def safe_divide(numerator, denominator):
         return float(numerator) / float(denominator) if denominator > 0 else 0.0
 
+    # Poprawka dla obrazów bez wad (i metryk IoU / F1)
+    if TP + FP + FN == 0:
+        # Zarówno Ground Truth jest puste, jak i model nic nie przewidział = perfekcyjny wynik
+        iou = 1.0
+        f1 = 1.0
+    else:
+        iou = safe_divide(TP, TP + FP + FN)
+        f1 = safe_divide(2 * TP, 2 * TP + FP + FN)
+
     return {
         "Accuracy": safe_divide(TP + TN, TP + TN + FP + FN),
         "Precision": safe_divide(TP, TP + FP),
         "Recall": safe_divide(TP, TP + FN),
-        "F1-Score": safe_divide(2 * TP, 2 * TP + FP + FN),
-        "IoU": safe_divide(TP, TP + FP + FN)
+        "F1-Score": f1,
+        "IoU": iou
     }
 
 def clean_up_mask(mask,params,size_override = 0):
