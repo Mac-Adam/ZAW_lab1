@@ -1,0 +1,12 @@
+{
+    "donut_max_aspect": 1.501140148434312,
+    "donut_area_ratio": 0.11373737742125646,
+    "donut_err_min_area": 900,
+    "donut_err_min_aspect": 0.7585081133187074,
+    "donut_err_min_extent": 0.3881990229905822,
+    "binary_err_min_area": 1200,
+    "cable_must_thr": 170,
+    "cable_can_thr": 20,
+    "insul_must_thr": 200,
+    "insul_can_thr": 10
+}
