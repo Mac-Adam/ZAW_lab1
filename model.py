@@ -1,62 +1,96 @@
 import cv2
 import numpy as np
 import os
-import numpy as np
-# Global list to hold pre-processed (256x256, grayscale, blurred) exemplars
-EXEMPLARS = []
 
-mask_ranges = {
-    'glare': [(0,255),(0,55),(191,255)],
-    'brown_cable': [(0,110),(0,48),(20,128)],
-    'blue_cable':[(97,120),(114,255),(0,255)],
-    'yellow_cable':[(29,75),(49,155),(74,206)],
-    'insulation':[(85,103),(39,113),(71,255)],
-    'black':[(0,255),(21,85),(0,25)],
-    'copper':[(0,24),(63,105),(30,255)]
-}
-
-locations = {
-    'brown_cable': [(450,1024),(450,1024)],
-    'blue_cable':[(0,550),(450,1024)],
-    'yellow_cable':[(0,1024),(0,512)],
-}
-
-# min area, min aspect_ratio min extent
-mask_filters = {
-    'glare': [0,0,0],
-    'brown_cable': [2000,0,0],
-    'blue_cable':[2000,0,0],
-    'yellow_cable':[2000,0,0],
-    'insulation':[20000,0,0],
-    'black':[10000,0,0.2],
-    'copper':[0,0,0]
-}
-# must be, can be
-matching_thr = {
-    'brown_cable': [150,30],
-    'blue_cable':[150,30],
-    'yellow_cable':[150,30],
-    'insulation':[220,30],
-    'wire':[250,30],
-    'black':[150,30]
+IN_DEPTH_MODE = False
+CONFIG = {
+    'mask_ranges': {
+        'glare': [(0, 255), (0, 55), (191, 255)],
+        'brown_cable': [(0, 110), (0, 48), (20, 128)],
+        'blue_cable': [(97, 120), (114, 255), (0, 255)],
+        'yellow_cable': [(29, 75), (49, 155), (74, 206)],
+        'insulation': [(85, 103), (39, 113), (71, 255)],
+        'black': [(0, 255), (21, 85), (0, 25)],
+        'copper': [(0, 24), (63, 105), (30, 255)]
+    },
+    'locations': {
+        'brown_cable': [(450, 1024), (450, 1024)],
+        'blue_cable': [(0, 550), (450, 1024)],
+        'yellow_cable': [(0, 1024), (0, 512)],
+    },
+    'mask_filters': {
+        'glare': [0, 0, 0],
+        'brown_cable': [2000, 0, 0],
+        'blue_cable': [2000, 0, 0],
+        'yellow_cable': [2000, 0, 0],
+        'insulation': [24000, 0, 0],
+        'black': [10000, 0, 0.2],
+        'copper': [0, 0, 0]
+    },
+    'matching_thr': {
+        'brown_cable': [170, 20],
+        'blue_cable': [170, 20],
+        'yellow_cable': [170, 20],
+        'insulation': [200, 10],
+        'wire': [235, 85],
+        'black': [170, 20]
+    },
+    'geometry': {
+        'roi_radius': 425,
+        'donut_min_pts': 50,
+        'donut_min_hull': 5,
+        'donut_max_aspect': 1.50,
+        'donut_area_ratio': 0.114
+    },
+    'wire_strands': {
+        'min_area': 200,
+        'max_area': 42000,
+        'circularity_thresh': 0.5275, 
+        'dilate_size': 13
+    },
+    'insulation_defects': {
+        'min_large_area': 15000,
+        'avg_area_high': 280,
+        'avg_area_low': 140,
+        'defect_count_thr': 8,
+        'morph_open_k': 7
+    },
+    'combine': {
+        'wire_open_k': 3,
+        'wire_close1_k': 11, 
+        'wire_dilate_k': 15,
+        'wire_dilate_iter': 1,
+        'wire_close2_k': 5,
+        'wire_cleanup_params': [8000, 0.6, 0.5],
+        'wire_cleanup_override': 25000,
+        'brown_close_k': 7,
+        'brown_open_k': 13,
+        'brown_cleanup_params': [5000, 0, 0]
+    },
+    'predict': {
+        'donut_erode_k': 5,
+        'donut_erode_iter': 6,
+        'donut_err_cleanup': [900, 0.76, 0.39],
+        'binary_err_cleanup': [1200, 0, 0],
+        'final_open_k': 7
+    },
+    'evaluation': {
+        'min_defect_pixels_to_alarm': 50
+    }
 }
 
 CACHED_GOLDEN_MASKS = {}
 
-import cv2
-import numpy as np
-
-def fit_ideal_donut(mask: np.ndarray):
+def fit_ideal_donut(mask: np.ndarray, config: dict):
     ideal_donut = np.zeros_like(mask)
-    
     points = cv2.findNonZero(mask)
 
-    if points is None or len(points) < 50:
+    if points is None or len(points) < config['geometry']['donut_min_pts']:
         return None, None
 
     hull = cv2.convexHull(points)
     
-    if len(hull) < 5:
+    if len(hull) < config['geometry']['donut_min_hull']:
         return None, None
         
     outer_ellipse = cv2.fitEllipse(hull)
@@ -67,43 +101,36 @@ def fit_ideal_donut(mask: np.ndarray):
         
     aspect_ratio = max(w, h) / min(w, h)
     ellipse_area = (np.pi * w * h) / 4
-    if aspect_ratio > 1.3: 
+    if aspect_ratio > config['geometry']['donut_max_aspect']: 
         return None, None
 
-    if ellipse_area > (mask.shape[0] * mask.shape[1] * 0.1):
+    if ellipse_area > (mask.shape[0] * mask.shape[1] * config['geometry']['donut_area_ratio']):
         return None, None
-
 
     solid_outer = np.zeros_like(mask)
     cv2.ellipse(solid_outer, outer_ellipse, 255, -1)
     
     internal_void = cv2.bitwise_and(solid_outer, cv2.bitwise_not(mask))
-    
     dist_transform = cv2.distanceTransform(internal_void, cv2.DIST_L2, 5)
-    
     _, max_val, _, max_loc = cv2.minMaxLoc(dist_transform)
     
     ideal_donut = solid_outer.copy()
-    
     inner_radius = int(max_val)
     if inner_radius > 0:
         cv2.circle(ideal_donut, max_loc, inner_radius, 0, -1)
         
     return ideal_donut, max_loc
 
-def check_wire_strands(wire_mask: np.ndarray, min_area=200, max_area=42000, circularity_thresh=0.35, dilate_size=13):
-    circular_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_size, dilate_size))
-    
+def check_wire_strands(wire_mask: np.ndarray, config: dict):
+    p = config['wire_strands']
+    circular_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (p['dilate_size'], p['dilate_size']))
     smooth_mask = cv2.dilate(wire_mask, circular_kernel, iterations=1)
-
     error_mask = np.zeros_like(smooth_mask)
-
     contours, _ = cv2.findContours(smooth_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     for contour in contours:
         area = cv2.contourArea(contour)
-        
-        if area < min_area:
+        if area < p['min_area']:
             continue 
 
         perimeter = cv2.arcLength(contour, True)
@@ -111,13 +138,13 @@ def check_wire_strands(wire_mask: np.ndarray, min_area=200, max_area=42000, circ
             continue
 
         circularity = 4 * np.pi * (area / (perimeter * perimeter))
-        if circularity < circularity_thresh or area > max_area:
+        if circularity < p['circularity_thresh'] or area > p['max_area']:
             cv2.drawContours(error_mask, [contour], -1, 255, -1)
 
     return error_mask
 
-
-def check_insulation_defects(c_mask: np.ndarray, g_mask: np.ndarray, matching_thr_tuple: tuple, min_large_area: int = 15000):
+def check_insulation_defects(c_mask: np.ndarray, g_mask: np.ndarray, matching_thr_tuple: tuple, config: dict):
+    p = config['insulation_defects']
     error_mask = np.zeros_like(c_mask)
     H, W = c_mask.shape
     total_image_area = H * W
@@ -127,29 +154,28 @@ def check_insulation_defects(c_mask: np.ndarray, g_mask: np.ndarray, matching_th
     avg_area = 0
     large_contours = []
     defect_contours = []
+    
     for cnt in contours:
         area = cv2.contourArea(cnt)
-
-
         if area > (total_image_area * 0.95):
             continue
 
-        if area > min_large_area:
+        if area > p['min_large_area']:
             large_contours.append(cnt)
         else:
-
             if area > 10: 
                 avg_area += area
                 defect_contours.append(cnt)
+                
     if avg_area != 0:
         avg_area /= len(defect_contours)
-    # --- TOPOLOGY DECISION TREE ---
-    if len(large_contours) == 2:
 
-        if avg_area > 200 or (avg_area > 100 and len(defect_contours) >=4):
+    if len(large_contours) == 2:
+        if avg_area > p['avg_area_high'] or (avg_area > p['avg_area_low'] and len(defect_contours) >= p['defect_count_thr']):
             cv2.drawContours(error_mask, defect_contours, -1, 255, -1)
         
-        error_mask = cv2.morphologyEx(error_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        k_size = p['morph_open_k']
+        error_mask = cv2.morphologyEx(error_mask, cv2.MORPH_OPEN, np.ones((k_size, k_size), np.uint8))
         return error_mask
         
     else:
@@ -159,23 +185,13 @@ def check_insulation_defects(c_mask: np.ndarray, g_mask: np.ndarray, matching_th
         g_mask_can = np.zeros_like(c_mask)
         g_mask_can[g_mask > matching_thr_tuple[1]] = 255
         
-        # The exact same must/can logic you wrote earlier
         err = (g_mask_must == 255) & (c_mask == 0)
         err |= (c_mask == 255) & (g_mask_can == 0)
         
         error_mask = (err.astype(np.uint8) * 255)
-        
         return error_mask
 
-def predict(image: np.ndarray) -> np.ndarray:
-    """
-    Args:
-        image: tablica NumPy, kształt (H, W, 3), dtype uint8, RGB
-        confidence_threshold: Float (0.0 to 1.0). How strict the golden mask should be.
-
-    Returns:
-        Maska binarna (H, W), dtype uint8. 255 = wada, 0 = brak wady.
-    """
+def predict(image: np.ndarray, config: dict = CONFIG, debug: bool = False) -> np.ndarray:
     global CACHED_GOLDEN_MASKS
     H, W = image.shape[:2]
     defect_mask = np.zeros((H, W), dtype=np.uint8)
@@ -194,77 +210,71 @@ def predict(image: np.ndarray) -> np.ndarray:
 
     bgr_image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
 
-    raw_masks = make_raw_masks(bgr_image)
-    proc_masks = process_masks(raw_masks)
-    current_masks = combine_masks(proc_masks)
+    raw_masks = make_raw_masks(bgr_image, config)
+    proc_masks = process_masks(raw_masks, config)
+    current_masks = combine_masks(proc_masks, config)
 
     errors = {}
+    p = config['predict']
 
     for key in current_masks:
-
-        # Grab the current mask
         c_mask = current_masks[key]
         g_mask = CACHED_GOLDEN_MASKS[key]
 
         if 'cable' in key:
-            # I was unable to make brown cable work
-            if key == 'brown_cable':
-                err = np.zeros_like(c_mask)
+            if key == "brown_cable":
                 continue
-            ideal_donut, location = fit_ideal_donut(c_mask)
-            # crude estimation on the cable placement:
-            if ideal_donut is not None and (locations[key][0][0] <  location[0] < locations[key][0][1]) and (locations[key][1][0] <  location[1] <locations[key][1][1]):
-                ideal_donut = cv2.morphologyEx(ideal_donut,cv2.MORPH_ERODE,np.ones((3,3)),iterations=4)
+            ideal_donut, location = fit_ideal_donut(c_mask, config)
+            loc_cfg = config['locations'][key]
+            
+            if ideal_donut is not None and (loc_cfg[0][0] < location[0] < loc_cfg[0][1]) and (loc_cfg[1][0] < location[1] < loc_cfg[1][1]):
+                k_size = p['donut_erode_k']
+                ideal_donut = cv2.morphologyEx(ideal_donut, cv2.MORPH_ERODE, np.ones((k_size, k_size)), iterations=p['donut_erode_iter'])
                 err = cv2.bitwise_and(ideal_donut, cv2.bitwise_not(c_mask))
-
-                err = clean_up_mask(err,[1000,0.5,0.4])
-
+                err = clean_up_mask(err, p['donut_err_cleanup'])
             else:
-                err = c_mask.copy()
-        elif key == 'wire':
-            err = check_wire_strands(c_mask)
-        elif key == 'insulation':
-            err = check_insulation_defects(c_mask, g_mask, matching_thr[key], min_large_area=15000)
-        else:
+                g_binary = np.zeros_like(g_mask)
+                g_binary[g_mask > config['matching_thr'][key][1]] = 255
+                err = cv2.bitwise_and(c_mask, cv2.bitwise_not(g_binary))
+                err = clean_up_mask(err, p['binary_err_cleanup'])
 
+        elif key == 'wire':
+            err = check_wire_strands(c_mask, config)
+        elif key == 'insulation':
+            err = check_insulation_defects(c_mask, g_mask, config['matching_thr'][key], config)
+        else:
             g_mask_must = np.zeros(c_mask.shape, dtype=np.uint8)
-            g_mask_must[g_mask > matching_thr[key][0]] = 255
+            g_mask_must[g_mask > config['matching_thr'][key][0]] = 255
 
             g_mask_can = np.zeros(c_mask.shape, dtype=np.uint8)
-            g_mask_can[g_mask > matching_thr[key][1]] = 255
+            g_mask_can[g_mask > config['matching_thr'][key][1]] = 255
             
             err = (g_mask_must == 255) & (c_mask == 0)
             err |= (c_mask == 255) & (g_mask_can == 0)
-            
             err = (err.astype(np.uint8) * 255)
-
-
         
         errors[key] = err
-            
-        # Resize them to 256x256 for display
-        c_disp = cv2.resize(c_mask, (256, 256))
-        g_disp = cv2.resize(g_mask, (256, 256))
-        e_disp = cv2.resize(err, (256, 256)) # Use the uint8 version
-        
-        # Stack them horizontally: Golden | Current | Err
-        comparison_img = np.hstack((g_disp, c_disp, e_disp))
-        
-        # Display the combined image
-        win_name = f"Compare [Golden | Current | Err]: {key}"
-        cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(win_name, 256*3, 256) # 768 wide, 256 tall
-        cv2.imshow(win_name, comparison_img)
 
-    for key,err in errors.items():
-        err = cv2.morphologyEx(err,cv2.MORPH_OPEN,cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+        # Restore the debug views
+        if debug:
+            c_disp = cv2.resize(c_mask, (256, 256))
+            g_disp = cv2.resize(g_mask, (256, 256))
+            e_disp = cv2.resize(err, (256, 256))
+            comparison_img = np.hstack((g_disp, c_disp, e_disp))
+            win_name = f"Compare [Golden | Current | Err]: {key}"
+            cv2.namedWindow(win_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(win_name, 768, 256)
+            cv2.imshow(win_name, comparison_img)
+
+    final_k = p['final_open_k']
+    ellipse_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (final_k, final_k))
+    for key, err in errors.items():
+        err = cv2.morphologyEx(err, cv2.MORPH_OPEN, ellipse_kernel)
         defect_mask |= err
 
-    # defect_mask = clean_up_mask(defect_mask,[100,0,0])
     return defect_mask
 
 def validate_prediction(pred_mask: np.ndarray, gt_mask: np.ndarray) -> dict:
-    """Calculates segmentation metrics between a prediction and a ground truth mask."""
     pred = (pred_mask > 0).astype(np.uint8)
     gt = (gt_mask > 0).astype(np.uint8)
 
@@ -276,9 +286,7 @@ def validate_prediction(pred_mask: np.ndarray, gt_mask: np.ndarray) -> dict:
     def safe_divide(numerator, denominator):
         return float(numerator) / float(denominator) if denominator > 0 else 0.0
 
-    # Poprawka dla obrazów bez wad (i metryk IoU / F1)
     if TP + FP + FN == 0:
-        # Zarówno Ground Truth jest puste, jak i model nic nie przewidział = perfekcyjny wynik
         iou = 1.0
         f1 = 1.0
     else:
@@ -293,7 +301,7 @@ def validate_prediction(pred_mask: np.ndarray, gt_mask: np.ndarray) -> dict:
         "IoU": iou
     }
 
-def clean_up_mask(mask,params,size_override = 0):
+def clean_up_mask(mask, params, size_override=0):
     retval, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
     good_idx = []
     MIN_AREA = params[0]
@@ -313,7 +321,6 @@ def clean_up_mask(mask,params,size_override = 0):
                 continue
                 
             aspect_ratio = min(w, h) / max(w, h)
-
             bounding_box_area = w * h
             extent = area / bounding_box_area
 
@@ -322,66 +329,65 @@ def clean_up_mask(mask,params,size_override = 0):
 
     return (np.isin(labels, good_idx) * 255).astype(np.uint8)
 
-def make_raw_masks(image):
+def make_raw_masks(image, config: dict):
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    W,H = image.shape[:2]
+    W, H = image.shape[:2]
     area_of_intrest = np.zeros((H, W), dtype=np.uint8)
 
     center = (W // 2, H // 2)
-    radius = 425
+    radius = config['geometry']['roi_radius']
 
     cv2.circle(area_of_intrest, center, radius, 255, -1)
 
     masks = {}
-    for key,values in mask_ranges.items():
+    for key, values in config['mask_ranges'].items():
         lower_bound = np.array([r[0] for r in values])
         upper_bound = np.array([r[1] for r in values])
         masks[key] = cv2.inRange(hsv, lower_bound, upper_bound) & area_of_intrest
     
     return masks
 
-def process_masks(masks):
+def process_masks(masks, config: dict):
     new_masks = {}
-    for key,mask in masks.items():
-        new_mask = cv2.morphologyEx(mask,cv2.MORPH_CLOSE,np.ones((3,3)),iterations=3)
-        new_masks[key] = clean_up_mask(new_mask,mask_filters[key])
+    for key, mask in masks.items():
+        new_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((3, 3)), iterations=3)
+        new_masks[key] = clean_up_mask(new_mask, config['mask_filters'][key])
 
     return new_masks
 
-def combine_masks(masks):
+def combine_masks(masks, config: dict):
+    p = config['combine']
     new_masks = {}
     already_verified = masks['insulation'].copy()
     new_masks['insulation'] = masks['insulation']
 
-    new_masks['blue_cable'] = masks['blue_cable'] &~ already_verified
+    new_masks['blue_cable'] = masks['blue_cable'] & ~already_verified
     already_verified |= new_masks['blue_cable']
 
-    new_masks['yellow_cable'] = masks['yellow_cable'] &~ already_verified
+    new_masks['yellow_cable'] = masks['yellow_cable'] & ~already_verified
     already_verified |= new_masks['yellow_cable']
 
-    new_masks['black'] = masks['black'] &~ already_verified
+    new_masks['black'] = masks['black'] & ~already_verified
     already_verified |= new_masks['black']
 
-    new_masks['wire'] = (masks['copper'] | masks['glare']) &~ already_verified
+    new_masks['wire'] = (masks['copper'] | masks['glare']) & ~already_verified
     
-    
-    new_masks['wire'] = cv2.morphologyEx(new_masks['wire'],cv2.MORPH_CLOSE, np.ones((3,3)))
-    new_masks['wire'] = cv2.morphologyEx(new_masks['wire'],cv2.MORPH_OPEN, np.ones((7,7)))
-    new_masks['wire'] = cv2.morphologyEx(new_masks['wire'],cv2.MORPH_DILATE, np.ones((11,11)),iterations=2)
-    new_masks['wire'] = cv2.morphologyEx(new_masks['wire'],cv2.MORPH_CLOSE, np.ones((3,3)))
-    new_masks['wire'] = clean_up_mask(new_masks['wire'],[10000,0.6,0.5],size_override = 25000)
+    new_masks['wire'] = cv2.morphologyEx(new_masks['wire'], cv2.MORPH_CLOSE, np.ones((p['wire_close1_k'], p['wire_close1_k'])))
+    new_masks['wire'] = cv2.morphologyEx(new_masks['wire'], cv2.MORPH_OPEN, np.ones((p['wire_open_k'], p['wire_open_k'])))
+    new_masks['wire'] = cv2.morphologyEx(new_masks['wire'], cv2.MORPH_DILATE, np.ones((p['wire_dilate_k'], p['wire_dilate_k'])), iterations=p['wire_dilate_iter'])
+    new_masks['wire'] = cv2.morphologyEx(new_masks['wire'], cv2.MORPH_CLOSE, np.ones((p['wire_close2_k'], p['wire_close2_k'])))
+    new_masks['wire'] = clean_up_mask(new_masks['wire'], p['wire_cleanup_params'], size_override=p['wire_cleanup_override'])
 
     already_verified |= new_masks['wire']
 
-    new_masks['brown_cable'] = masks['brown_cable'] &~ already_verified
-    new_masks['brown_cable'] = cv2.morphologyEx(new_masks['brown_cable'],cv2.MORPH_CLOSE, np.ones((3,3)))
-    new_masks['brown_cable'] = cv2.morphologyEx(new_masks['brown_cable'],cv2.MORPH_OPEN, np.ones((13,13)))
-    new_masks['brown_cable'] = clean_up_mask(new_masks['brown_cable'],[5000,0,0])
+    new_masks['brown_cable'] = masks['brown_cable'] & ~already_verified
+    new_masks['brown_cable'] = cv2.morphologyEx(new_masks['brown_cable'], cv2.MORPH_CLOSE, np.ones((p['brown_close_k'], p['brown_close_k'])))
+    new_masks['brown_cable'] = cv2.morphologyEx(new_masks['brown_cable'], cv2.MORPH_OPEN, np.ones((p['brown_open_k'], p['brown_open_k'])))
+    new_masks['brown_cable'] = clean_up_mask(new_masks['brown_cable'], p['brown_cleanup_params'])
 
     return new_masks
 
-
-def prepare_golden_masks(train_dir="./data/train/good"):
+def prepare_golden_masks(train_dir="./data/train/good", config: dict = CONFIG):
     print("Preparing Golden Masks")
     
     accumulators = {}
@@ -398,9 +404,9 @@ def prepare_golden_masks(train_dir="./data/train/good"):
             if in_img_bgr is None:
                 continue
 
-            masks = make_raw_masks(in_img_bgr)
-            masks = process_masks(masks)
-            masks = combine_masks(masks)
+            masks = make_raw_masks(in_img_bgr, config)
+            masks = process_masks(masks, config)
+            masks = combine_masks(masks, config)
 
             if image_count == 0:
                 for key in masks.keys():
@@ -421,28 +427,19 @@ def prepare_golden_masks(train_dir="./data/train/good"):
     golden_masks = {}
     for key, acc in accumulators.items():
         probability_map = acc / image_count
-        
         golden_mask = (probability_map*255).astype(np.uint8)
         golden_masks[key] = golden_mask
-    
         cv2.imwrite(f"masks/mask_{key}.png", golden_masks[key])
 
     print("Golden masks successfully generated and saved to disk.")
     return golden_masks
 
 if __name__ == "__main__":
-
-    # False -> Test everything
-    # True  -> Allows you to go example by example
-    IN_DEPTH_MODE = False 
-    
-    # If this amout of pixesls is flageed as defect assume there is one
-    MIN_DEFECT_PIXELS_TO_ALARM = 50 
+    IN_DEPTH_MODE = True 
 
     test_base_dir = "./data/test"
     print(f"\nStarting Evaluation... (In-Depth Mode: {IN_DEPTH_MODE})")
     
-    # OVERALL accumulators
     total_pixel_metrics = {"Accuracy": 0.0, "Precision": 0.0, "Recall": 0.0, "F1-Score": 0.0, "IoU": 0.0}
     total_img_TP, total_img_TN, total_img_FP, total_img_FN = 0, 0, 0, 0
     total_images_processed = 0
@@ -455,7 +452,6 @@ if __name__ == "__main__":
             
         print(f"\n--- Testing Category: {folder_name} ---")
         
-        # CATEGORY accumulators
         cat_pixel_metrics = {"Accuracy": 0.0, "Precision": 0.0, "Recall": 0.0, "F1-Score": 0.0, "IoU": 0.0}
         cat_img_TP, cat_img_TN, cat_img_FP, cat_img_FN = 0, 0, 0, 0
         cat_images_processed = 0
@@ -473,7 +469,6 @@ if __name__ == "__main__":
             
             in_img_rgb = cv2.cvtColor(in_img_bgr, cv2.COLOR_BGR2RGB)
             
-            # --- Ground Truth Handling ---
             if folder_name.lower() == 'good':
                 gt_img = np.zeros(shape=(in_img_bgr.shape[0], in_img_bgr.shape[1]), dtype=np.uint8)
             else:
@@ -482,19 +477,14 @@ if __name__ == "__main__":
                 if gt_img is None:
                     gt_img = np.zeros(shape=(in_img_bgr.shape[0], in_img_bgr.shape[1]), dtype=np.uint8)
 
-            # -----------------------------------------
-            # RUN PREDICTION
-            # -----------------------------------------
-            pred_mask = predict(in_img_rgb)
+            pred_mask = predict(in_img_rgb, CONFIG, IN_DEPTH_MODE)
             
-            # 1. Pixel-Level Evaluation
             metrics = validate_prediction(pred_mask, gt_img)
             for k in total_pixel_metrics.keys():
                 cat_pixel_metrics[k] += metrics[k]
                 total_pixel_metrics[k] += metrics[k]
 
-            # 2. Image-Level Evaluation (Detection vs Not Detected)
-            pred_is_defective = cv2.countNonZero(pred_mask) > MIN_DEFECT_PIXELS_TO_ALARM
+            pred_is_defective = cv2.countNonZero(pred_mask) > CONFIG['evaluation']['min_defect_pixels_to_alarm']
             gt_is_defective = cv2.countNonZero(gt_img) > 0
             
             if pred_is_defective and gt_is_defective:
@@ -509,9 +499,6 @@ if __name__ == "__main__":
             cat_images_processed += 1
             total_images_processed += 1
 
-            # -----------------------------------------
-            # VISUALIZATION (In-Depth Mode Only)
-            # -----------------------------------------
             if IN_DEPTH_MODE:
                 print(f"  Pixel Metrics: {{k: f'{{v:.2f}}' for k, v in metrics.items()}}")
                 print(f"  Image Alarm: {'DEFECT' if pred_is_defective else 'GOOD'} | Ground Truth: {'DEFECT' if gt_is_defective else 'GOOD'}")
@@ -536,9 +523,6 @@ if __name__ == "__main__":
                     cv2.destroyAllWindows()
                     exit()
 
-        # -----------------------------------------
-        # CATEGORY SUMMARY
-        # -----------------------------------------
         if cat_images_processed > 0:
             print(f"\n[{folder_name}] - Category Results ({cat_images_processed} images):")
             print(f"  Image-Level Detections -> TP: {cat_img_TP} | TN: {cat_img_TN} | FP: {cat_img_FP} | FN: {cat_img_FN}")
@@ -552,9 +536,6 @@ if __name__ == "__main__":
 
     cv2.destroyAllWindows()
 
-    # -----------------------------------------
-    # FINAL OVERALL SUMMARY
-    # -----------------------------------------
     if not IN_DEPTH_MODE and total_images_processed > 0:
         print("\n========================================================")
         print(f"               FINAL OVERALL DATASET RESULTS            ")
